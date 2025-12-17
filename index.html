@@ -1,0 +1,480 @@
+import React, { useState, useEffect } from 'react';
+import { Plus, Trash2, Users, DollarSign, Calculator, List, UserPlus, X, CheckCircle } from 'lucide-react';
+
+const SplitBillApp = () => {
+  // --- State Management ---
+  const [activeTab, setActiveTab] = useState('expenses'); // 'expenses', 'settle', 'members'
+  
+  // 預設成員
+  const [users, setUsers] = useState([
+    { id: 1, name: '我' },
+    { id: 2, name: '朋友 A' }
+  ]);
+  
+  // 支出紀錄
+  const [expenses, setExpenses] = useState([]);
+  
+  // 新增支出的表單狀態
+  const [newExpense, setNewExpense] = useState({
+    description: '',
+    amount: '',
+    payerId: '',
+    involvedUserIds: [] 
+  });
+
+  const [newUserName, setNewUserName] = useState('');
+
+  // 初始化：當 user 變更或組件加載時，確保表單預設值正確
+  useEffect(() => {
+    if (users.length > 0 && !newExpense.payerId) {
+      setNewExpense(prev => ({
+        ...prev,
+        payerId: users[0].id,
+        involvedUserIds: users.map(u => u.id) // 預設全員分攤
+      }));
+    }
+  }, [users]);
+
+  // --- Handlers ---
+
+  const handleAddUser = () => {
+    if (!newUserName.trim()) return;
+    const newUser = {
+      id: Date.now(),
+      name: newUserName.trim()
+    };
+    setUsers([...users, newUser]);
+    setNewUserName('');
+    // 自動將新成員加入下筆交易的預設分攤名單
+    setNewExpense(prev => ({
+      ...prev,
+      involvedUserIds: [...prev.involvedUserIds, newUser.id]
+    }));
+  };
+
+  const removeUser = (id) => {
+    if (users.length <= 1) {
+      alert("至少需要保留一位成員");
+      return;
+    }
+    // 檢查是否有相關連的支出
+    const isInvolved = expenses.some(e => e.payerId === id || e.involvedUserIds.includes(id));
+    if (isInvolved) {
+      alert("此成員已有交易紀錄，無法刪除。請先刪除相關交易。");
+      return;
+    }
+    setUsers(users.filter(u => u.id !== id));
+  };
+
+  const toggleInvolvedUser = (userId) => {
+    setNewExpense(prev => {
+      const current = prev.involvedUserIds;
+      if (current.includes(userId)) {
+        // 如果只剩一個人，不允許取消（至少要有一人分攤）
+        if (current.length === 1) return prev;
+        return { ...prev, involvedUserIds: current.filter(id => id !== userId) };
+      } else {
+        return { ...prev, involvedUserIds: [...current, userId] };
+      }
+    });
+  };
+
+  const handleAddExpense = () => {
+    if (!newExpense.description || !newExpense.amount || Number(newExpense.amount) <= 0) {
+      alert("請輸入有效的項目名稱與金額");
+      return;
+    }
+
+    const expense = {
+      id: Date.now(),
+      description: newExpense.description,
+      amount: parseFloat(newExpense.amount),
+      payerId: parseInt(newExpense.payerId),
+      involvedUserIds: newExpense.involvedUserIds,
+      date: new Date().toLocaleDateString()
+    };
+
+    setExpenses([expense, ...expenses]);
+    
+    // 重置表單，但保留分攤人設定以方便連續輸入
+    setNewExpense({
+      ...newExpense,
+      description: '',
+      amount: ''
+    });
+  };
+
+  const deleteExpense = (id) => {
+    setExpenses(expenses.filter(e => e.id !== id));
+  };
+
+  // --- Calculation Logic ---
+
+  const calculateSettlement = () => {
+    const balances = {}; // { userId: netBalance } 
+    // 正數代表別人欠他錢 (應收)，負數代表他欠別人錢 (應付)
+
+    // 初始化餘額
+    users.forEach(u => balances[u.id] = 0);
+
+    expenses.forEach(exp => {
+      const payerId = exp.payerId;
+      const amount = exp.amount;
+      const splitCount = exp.involvedUserIds.length;
+      const splitAmount = amount / splitCount;
+
+      // 墊付人 +amount (他先出了錢，這是他的債權)
+      if (balances[payerId] !== undefined) {
+        balances[payerId] += amount;
+      }
+
+      // 分攤人 -splitAmount (這是他們的債務/消費)
+      exp.involvedUserIds.forEach(uid => {
+        if (balances[uid] !== undefined) {
+          balances[uid] -= splitAmount;
+        }
+      });
+    });
+
+    // 產生建議轉帳路徑 (最小化交易算法 - 簡化版)
+    let debtors = [];
+    let creditors = [];
+
+    Object.keys(balances).forEach(userId => {
+      const id = parseInt(userId);
+      const val = balances[id];
+      if (val < -0.01) debtors.push({ id, amount: val }); // 欠錢的人
+      if (val > 0.01) creditors.push({ id, amount: val }); // 收錢的人
+    });
+
+    // 排序，從金額大的開始處理
+    debtors.sort((a, b) => a.amount - b.amount);
+    creditors.sort((a, b) => b.amount - a.amount);
+
+    const transactions = [];
+    let i = 0; // debtor index
+    let j = 0; // creditor index
+
+    while (i < debtors.length && j < creditors.length) {
+      const debtor = debtors[i];
+      const creditor = creditors[j];
+
+      // 取兩者絕對值較小者作為交易金額
+      const amount = Math.min(Math.abs(debtor.amount), creditor.amount);
+      
+      transactions.push({
+        from: users.find(u => u.id === debtor.id)?.name || '未知',
+        to: users.find(u => u.id === creditor.id)?.name || '未知',
+        amount: amount.toFixed(1) // 保留一位小數
+      });
+
+      // 更新餘額
+      debtor.amount += amount;
+      creditor.amount -= amount;
+
+      // 如果某方結清了，移動指標
+      if (Math.abs(debtor.amount) < 0.01) i++;
+      if (creditor.amount < 0.01) j++;
+    }
+
+    return { balances, transactions };
+  };
+
+  const { balances, transactions } = calculateSettlement();
+
+  // --- UI Components ---
+
+  const TabButton = ({ id, label, icon: Icon }) => (
+    <button
+      onClick={() => setActiveTab(id)}
+      className={`flex-1 py-3 flex flex-col items-center justify-center text-sm font-medium transition-colors ${
+        activeTab === id 
+          ? 'text-blue-600 border-t-2 border-blue-600 bg-blue-50' 
+          : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+      }`}
+    >
+      <Icon size={20} className="mb-1" />
+      {label}
+    </button>
+  );
+
+  return (
+    <div className="max-w-md mx-auto h-screen flex flex-col bg-gray-100 font-sans text-gray-800">
+      {/* Header */}
+      <header className="bg-white shadow-sm px-4 py-3 sticky top-0 z-10">
+        <div className="flex justify-between items-center">
+          <h1 className="text-xl font-bold text-gray-800 flex items-center">
+            <Calculator className="mr-2 text-blue-600" />
+            分帳管家
+          </h1>
+          <div className="text-sm text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
+            {expenses.length} 筆紀錄
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content Area */}
+      <main className="flex-1 overflow-y-auto p-4 pb-24">
+        
+        {/* TAB: MEMBERS */}
+        {activeTab === 'members' && (
+          <div className="space-y-4">
+            <div className="bg-white p-4 rounded-xl shadow-sm">
+              <h2 className="text-lg font-semibold mb-3 flex items-center">
+                <Users className="w-5 h-5 mr-2 text-blue-500" />
+                管理成員
+              </h2>
+              <div className="flex space-x-2 mb-4">
+                <input
+                  type="text"
+                  placeholder="輸入名字..."
+                  className="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={newUserName}
+                  onChange={(e) => setNewUserName(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleAddUser()}
+                />
+                <button 
+                  onClick={handleAddUser}
+                  className="bg-blue-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-blue-700 transition"
+                >
+                  <UserPlus size={18} />
+                </button>
+              </div>
+              
+              <div className="space-y-2">
+                {users.map(user => (
+                  <div key={user.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg border border-gray-100">
+                    <span className="font-medium text-gray-700">{user.name}</span>
+                    <button 
+                      onClick={() => removeUser(user.id)}
+                      className="text-gray-400 hover:text-red-500 transition"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            
+            <div className="text-xs text-gray-500 text-center px-4">
+              提示：新增成員後，他們會自動出現在記帳的選項中。
+            </div>
+          </div>
+        )}
+
+        {/* TAB: EXPENSES (List & Add) */}
+        {activeTab === 'expenses' && (
+          <div className="space-y-6">
+            {/* Add Expense Form */}
+            <div className="bg-white p-4 rounded-xl shadow-sm border border-blue-100">
+              <h2 className="text-lg font-semibold mb-4 text-blue-800">新增一筆支出</h2>
+              
+              <div className="space-y-3">
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="col-span-2">
+                    <label className="text-xs text-gray-500 block mb-1">項目</label>
+                    <input
+                      type="text"
+                      placeholder="例如: 晚餐、車費"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+                      value={newExpense.description}
+                      onChange={(e) => setNewExpense({...newExpense, description: e.target.value})}
+                    />
+                  </div>
+                  <div className="col-span-1">
+                    <label className="text-xs text-gray-500 block mb-1">金額</label>
+                    <input
+                      type="number"
+                      placeholder="0"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+                      value={newExpense.amount}
+                      onChange={(e) => setNewExpense({...newExpense, amount: e.target.value})}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">誰先墊付 (支出人)</label>
+                  <div className="flex overflow-x-auto pb-2 gap-2 hide-scrollbar">
+                    {users.map(user => (
+                      <button
+                        key={user.id}
+                        onClick={() => setNewExpense({...newExpense, payerId: user.id})}
+                        className={`px-3 py-1.5 rounded-full text-sm whitespace-nowrap border transition-all ${
+                          newExpense.payerId === user.id
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-gray-600 border-gray-200 hover:border-blue-300'
+                        }`}
+                      >
+                        {user.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">分攤給誰 (預設全員)</label>
+                  <div className="flex flex-wrap gap-2">
+                    {users.map(user => {
+                      const isSelected = newExpense.involvedUserIds.includes(user.id);
+                      return (
+                        <button
+                          key={user.id}
+                          onClick={() => toggleInvolvedUser(user.id)}
+                          className={`px-3 py-1 rounded-md text-xs font-medium border transition-all ${
+                            isSelected
+                              ? 'bg-green-50 text-green-700 border-green-200'
+                              : 'bg-gray-50 text-gray-400 border-transparent hover:bg-gray-100'
+                          }`}
+                        >
+                          {isSelected && <CheckCircle size={12} className="inline mr-1" />}
+                          {user.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <button
+                  onClick={handleAddExpense}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-lg font-semibold shadow-md active:transform active:scale-95 transition mt-2"
+                >
+                  加入紀錄
+                </button>
+              </div>
+            </div>
+
+            {/* Expense List */}
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold text-gray-500 px-1">最近紀錄</h3>
+              {expenses.length === 0 ? (
+                <div className="text-center py-10 text-gray-400 bg-white rounded-xl border border-dashed border-gray-300">
+                  <List className="mx-auto mb-2 opacity-50" />
+                  <p>還沒有支出紀錄</p>
+                </div>
+              ) : (
+                expenses.map(exp => {
+                  const payerName = users.find(u => u.id === exp.payerId)?.name || '未知';
+                  return (
+                    <div key={exp.id} className="bg-white p-3 rounded-xl shadow-sm border border-gray-100 flex justify-between items-center">
+                      <div className="flex-1">
+                        <div className="font-semibold text-gray-800">{exp.description}</div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded mr-1">
+                            {payerName} 墊付
+                          </span>
+                          <span className="text-gray-400">
+                             ({exp.involvedUserIds.length} 人分)
+                          </span>
+                        </div>
+                      </div>
+                      <div className="text-right flex items-center space-x-3">
+                        <span className="font-bold text-lg text-gray-800">${exp.amount}</span>
+                        <button 
+                          onClick={() => deleteExpense(exp.id)}
+                          className="text-gray-300 hover:text-red-500 p-1"
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB: SETTLEMENT (Report) */}
+        {activeTab === 'settle' && (
+          <div className="space-y-6">
+            
+            {/* Action Plan */}
+            <div className="bg-gradient-to-br from-indigo-600 to-blue-700 text-white p-5 rounded-2xl shadow-lg">
+              <h2 className="text-lg font-bold mb-4 flex items-center">
+                <DollarSign className="mr-1" /> 結帳建議
+              </h2>
+              {transactions.length === 0 ? (
+                <div className="text-center py-4 bg-white/10 rounded-lg">
+                  <p className="text-blue-100">目前沒有需要結算的債務 🎉</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {transactions.map((t, idx) => (
+                    <div key={idx} className="bg-white/10 p-3 rounded-lg flex items-center justify-between backdrop-blur-sm border border-white/10">
+                      <div className="flex items-center space-x-2">
+                        <span className="font-bold">{t.from}</span>
+                        <span className="text-blue-200 text-xs">給</span>
+                        <span className="font-bold">{t.to}</span>
+                      </div>
+                      <div className="font-mono font-bold text-xl text-yellow-300">
+                        ${t.amount}
+                      </div>
+                    </div>
+                  ))}
+                  <div className="text-xs text-blue-200 text-center mt-2 pt-2 border-t border-white/10">
+                    按照以上建議轉帳，即可結清所有費用。
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Detailed Stats */}
+            <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+              <h3 className="text-gray-700 font-semibold mb-3">收支詳情</h3>
+              <div className="space-y-3">
+                {users.map(user => {
+                  const net = balances[user.id] || 0;
+                  const isPositive = net > 0.01;
+                  const isNegative = net < -0.01;
+                  const isEven = !isPositive && !isNegative;
+
+                  return (
+                    <div key={user.id} className="flex justify-between items-center py-2 border-b border-gray-50 last:border-0">
+                      <span className="text-gray-700">{user.name}</span>
+                      <div className={`font-medium ${
+                        isPositive ? 'text-green-600' : 
+                        isNegative ? 'text-red-500' : 'text-gray-400'
+                      }`}>
+                        {isPositive && `應收 $${net.toFixed(1)}`}
+                        {isNegative && `應付 $${Math.abs(net).toFixed(1)}`}
+                        {isEven && "已結清"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {expenses.length > 0 && (
+              <button 
+                onClick={() => {
+                  if(confirm('確定要清除所有支出紀錄並重新開始嗎？')) {
+                    setExpenses([]);
+                  }
+                }}
+                className="w-full py-3 text-red-500 text-sm font-medium hover:bg-red-50 rounded-lg transition"
+              >
+                清除所有紀錄重新開始
+              </button>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* Bottom Navigation */}
+      <nav className="bg-white border-t border-gray-200 flex fixed bottom-0 w-full max-w-md pb-safe">
+        <TabButton id="expenses" label="記帳" icon={Plus} />
+        <TabButton id="members" label="成員" icon={Users} />
+        <TabButton id="settle" label="結算" icon={Calculator} />
+      </nav>
+      
+      {/* Mobile Safe Area Spacer */}
+      <div className="h-6 w-full bg-white fixed bottom-0 z-50 pointer-events-none md:hidden" />
+    </div>
+  );
+};
+
+export default SplitBillApp;
+
+
